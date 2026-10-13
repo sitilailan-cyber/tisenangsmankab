@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ti senang - Web Monitor Kit Ti Senang</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    body { background-color: #f0f4f8; color: #333; padding: 20px; display: flex; justify-content: center; }
+    .container { max-width: 500px; width: 100%; background: #ffffff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
+    h1 { font-size: 24px; color: #1e293b; text-align: center; margin-bottom: 8px; }
+    p.subtitle { font-size: 14px; color: #64748b; text-align: center; margin-bottom: 20px; }
+    
+    .status-card { display: flex; align-items: center; justify-content: space-between; background: #f8fafc; padding: 12px 16px; border-radius: 8px; border: 1px solid #e2e8f0; margin-bottom: 20px; }
+    .status-indicator { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #ef4444; margin-right: 8px; }
+    .status-indicator.connected { background-color: #22c55e; }
+    
+    .btn-connect { width: 100%; padding: 12px; font-size: 16px; font-weight: 600; color: #fff; background-color: #2563eb; border: none; border-radius: 8px; cursor: pointer; transition: background 0.2s; margin-bottom: 20px; }
+    .btn-connect:hover { background-color: #1d4ed8; }
+    
+    .sensor-grid { display: flex; flex-direction: column; gap: 12px; }
+    .sensor-card { background: #f8fafc; border-left: 4px solid #94a3b8; padding: 15px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; }
+    .sensor-card.suhu { border-left-color: #ef4444; }
+    .sensor-card.kelembapan { border-left-color: #06b6d4; }
+    .sensor-card.cahaya { border-left-color: #eab308; }
+    
+    .sensor-title { font-size: 14px; font-weight: 600; color: #475569; }
+    .sensor-value { font-size: 22px; font-weight: 700; color: #0f172a; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h1>ti senang</h1>
+  <p class="subtitle">Monitoring Sensor Kit Ti Senang (BLE Localhost)</p>
+
+  <div class="status-card">
+    <div>
+      <span id="dotStatus" class="status-indicator"></span>
+      <span id="txtStatus" style="font-weight: 500; font-size: 14px;">Terputus</span>
+    </div>
+    <span id="txtDevice" style="font-size: 12px; color: #64748b;">-</span>
+  </div>
+
+  <button id="btnConnect" class="btn-connect" onclick="hubungkanBluetooth()">Hubungkan Kit Ti Senang</button>
+
+  <div class="sensor-grid">
+    <div class="sensor-card suhu">
+      <span class="sensor-title">Suhu (DS18B20)</span>
+      <span class="sensor-value"><span id="valSuhu">--</span> °C</span>
+    </div>
+    <div class="sensor-card kelembapan">
+      <span class="sensor-title">Kelembapan (DHT11)</span>
+      <span class="sensor-value"><span id="valLembap">--</span> %</span>
+    </div>
+    <div class="sensor-card cahaya">
+      <span class="sensor-title">Cahaya (BH1750)</span>
+      <span class="sensor-value"><span id="valCahaya">--</span> Lux</span>
+    </div>
+  </div>
+</div>
+
+<script>
+  // UUID BLE ESP32 Kit Ti Senang
+  const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+  const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+  let bleDevice = null;
+  let previewInterval = null;
+
+  async function hubungkanBluetooth() {
+    // Jika sedang terhubung, klik tombol akan memutuskan koneksi
+    const currentBtn = document.getElementById("btnConnect");
+    if (currentBtn && currentBtn.innerText.includes("Terhubung")) {
+      onDisconnected();
+      return;
+    }
+
+    try {
+      console.log("Mencari perangkat BLE Kit Ti Senang...");
+      
+      // 1. Minta akses Bluetooth dari browser
+      bleDevice = await navigator.bluetooth.requestDevice({
+        filters: [{ name: 'Kit Ti Senang' }],
+        optionalServices: [SERVICE_UUID]
+      });
+
+      // Deteksi jika koneksi terputus
+      bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+      updateStatus(false, "Menghubungkan...");
+      console.log("Menghubungkan ke GATT Server...");
+      const server = await bleDevice.gatt.connect();
+
+      console.log("Mengambil Service BLE...");
+      const service = await server.getPrimaryService(SERVICE_UUID);
+
+      console.log("Mengambil Characteristic BLE...");
+      const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+      // 2. Aktifkan Notifikasi Aliran Data
+      await characteristic.startNotifications();
+      console.log("Notifikasi BLE Aktif!");
+
+      updateStatus(true, "Terhubung");
+      document.getElementById("txtDevice").innerText = bleDevice.name;
+
+      // 3. Listener Pembaca Data JSON dari ESP32
+      let bleBuffer = '';
+      characteristic.addEventListener('characteristicvaluechanged', (event) => {
+        const decoder = new TextDecoder('utf-8');
+        const rawChunk = decoder.decode(event.target.value);
+        console.log("Data BLE Masuk:", rawChunk);
+
+        bleBuffer += rawChunk;
+        let data = null;
+
+        try {
+          data = JSON.parse(bleBuffer.trim());
+          bleBuffer = '';
+        } catch {
+          const s = bleBuffer.indexOf('{');
+          const e = bleBuffer.lastIndexOf('}');
+          if (s !== -1 && e !== -1 && e > s) {
+            try {
+              data = JSON.parse(bleBuffer.substring(s, e + 1));
+              bleBuffer = bleBuffer.substring(e + 1);
+            } catch {}
+          }
+        }
+
+        if (bleBuffer.length > 512) bleBuffer = '';
+
+        if (data) {
+          console.log("Data Sensor ESP32:", data);
+
+          // Ekstraksi Suhu Murni (DS18B20 / suhu_air / temp)
+          let suhuVal = undefined;
+          if (data.suhu_air !== undefined && data.suhu_air !== null && Number(data.suhu_air) !== 0 && Number(data.suhu_air) !== -127) {
+            suhuVal = Number(data.suhu_air);
+          } else if (data.suhu !== undefined && data.suhu !== null && Number(data.suhu) !== 0 && Number(data.suhu) !== -127) {
+            suhuVal = Number(data.suhu);
+          } else if (data.temp !== undefined && data.temp !== null && Number(data.temp) !== 0 && Number(data.temp) !== -127) {
+            suhuVal = Number(data.temp);
+          } else if (data.temperature !== undefined && data.temperature !== null && Number(data.temperature) !== 0 && Number(data.temperature) !== -127) {
+            suhuVal = Number(data.temperature);
+          } else if (data.suhu !== undefined && data.suhu !== null && !isNaN(Number(data.suhu))) {
+            suhuVal = Number(data.suhu);
+          } else if (data.suhu_air !== undefined && data.suhu_air !== null && !isNaN(Number(data.suhu_air))) {
+            suhuVal = Number(data.suhu_air);
+          }
+
+          // Ekstraksi Kelembapan HANYA jika sensor terhubung secara fisik (> 0)
+          let lembapVal = undefined;
+          const rawHum = data.kelembapan ?? data.kelembaban ?? data.humidity ?? data.hum;
+          if (rawHum !== undefined && rawHum !== null && !isNaN(Number(rawHum)) && Number(rawHum) > 0) {
+            lembapVal = Number(rawHum);
+          }
+
+          // Ekstraksi Cahaya HANYA jika sensor terhubung secara fisik (> 0)
+          let cahayaVal = undefined;
+          const rawLux = data.cahaya ?? data.lux ?? data.light ?? data.ldr;
+          if (rawLux !== undefined && rawLux !== null && !isNaN(Number(rawLux)) && Number(rawLux) > 0) {
+            cahayaVal = Number(rawLux);
+          }
+
+          // Update Suhu (DS18B20)
+          document.getElementById('valSuhu').innerText = suhuVal !== undefined ? suhuVal : "--";
+
+          // Update Kelembapan (DHT11)
+          document.getElementById('valLembap').innerText = lembapVal !== undefined ? lembapVal : "--";
+
+          // Update Cahaya (BH1750)
+          document.getElementById('valCahaya').innerText = cahayaVal !== undefined ? cahayaVal : "--";
+        }
+      });
+
+    } catch (error) {
+      console.warn("Koneksi BLE tidak berhasil atau dibatalkan:", error);
+      updateStatus(false, "Gagal Terhubung");
+      document.getElementById("txtDevice").innerText = "-";
+      document.getElementById('valSuhu').innerText = "--";
+      document.getElementById('valLembap').innerText = "--";
+      document.getElementById('valCahaya').innerText = "--";
+    }
+  }
+
+  function onDisconnected() {
+    console.log("Koneksi BLE terputus.");
+    updateStatus(false, "Terputus");
+    document.getElementById("txtDevice").innerText = "-";
+    document.getElementById('valSuhu').innerText = "--";
+    document.getElementById('valLembap').innerText = "--";
+    document.getElementById('valCahaya').innerText = "--";
+  }
+
+  function updateStatus(isConnected, text) {
+    const dot = document.getElementById("dotStatus");
+    const txt = document.getElementById("txtStatus");
+    const btn = document.getElementById("btnConnect");
+
+    if (txt) txt.innerText = text;
+    if (btn) {
+      if (isConnected) {
+        if (dot) dot.classList.add("connected");
+        btn.innerText = "Terhubung ke Kit Ti Senang";
+        btn.style.backgroundColor = "#16a34a";
+      } else {
+        if (dot) dot.classList.remove("connected");
+        btn.innerText = "Hubungkan Kit Ti Senang";
+        btn.style.backgroundColor = "#2563eb";
+      }
+    }
+  }
+</script>
+
+</body>
+</html>
